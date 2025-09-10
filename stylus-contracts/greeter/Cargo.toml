@@ -17,6 +17,9 @@ cdc = "0.1.1"
 filebuffer = "1.0.0"
 md-5 = "0.10.6"
 ciborium = "0.2.2"
+borsh = "1.5.7"
+minicbor = { version = "2.1.1", features = ["derive"]}
+fastcdc = "3.2.1"
 
 [dev-dependencies]
 alloy-primitives = { version = "=0.8.20", features = ["sha3-keccak"] }

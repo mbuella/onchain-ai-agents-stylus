@@ -29,22 +29,132 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 
+use ciborium::{de::from_reader_with_buffer, de::from_reader, ser::into_writer};
+use borsh::{BorshSerialize, BorshDeserialize};
+// use std::collections::VecDeque;
+use md5::{Md5, Digest};
+
 /// Import items from the SDK. The prelude contains common traits and macros.
+use stylus_sdk::alloy_primitives::{address, Address, fixed_bytes, FixedBytes, U256, B256};
+use stylus_sdk::abi::Bytes;
 use stylus_sdk::prelude::*;
 use stylus_sdk::storage::*;
+use stylus_sdk::crypto::keccak;
 
-// Define some persistent storage using the Solidity ABI.
-// `Greeter` will be the entrypoint.
-sol_storage! {
-    #[entrypoint]
-    pub struct Greeter {
-        StorageString name;
-    }
+// // Define some persistent storage using the Solidity ABI.
+// // `Greeter` will be the entrypoint.
+// sol_storage! {
+//     #[entrypoint]
+//     pub struct Greeter {
+//         StorageMap<FixedBytes<32>, StorageBytes> agent_revisions;
+//         StorageBytes agent_revisions_serialized;
+//         // StorageMap<FixedBytes<4>,StorageBytes> agent_revisions_serialized;
+//         StorageBytes agent_model;
+//         StorageString name;
+//     }
+// }
+#[storage]
+#[entrypoint]
+pub struct Greeter {
+    // agent_revisions: StorageMap<FixedBytes<32>, StorageBytes>,
+    agent_serialized: StorageMap<U256, StorageBytes>,
+    agent_serialized_manifests: StorageMap<FixedBytes<32>, StorageVec<StorageU256>>,
+    name: StorageString,
 }
 
 /// Declare that `Greeter` is a contract with the following external methods.
 #[public]
 impl Greeter {
+    pub fn add_agent_revision(&mut self, agent: Vec<u8>) {
+        let mut agent_hasher = Md5::new();
+        agent_hasher.update(&agent);
+        let agent_hash = format!("{:x}", agent_hasher.finalize());
+
+        // break down the agent content (bytes) into chunks
+        let chunk_avg_size: u32 = 262144; // 256kb
+        let chunk_min_size = chunk_avg_size / 4;
+        let chunk_max_size = chunk_avg_size * 4;
+        let agent_chunks = fastcdc::v2020::FastCDC::new(
+            &agent,
+            chunk_min_size,
+            chunk_avg_size,
+            chunk_max_size
+        );
+        
+        // now start the chunking and building the manifest
+        let agent_revision_manifest: Vec<U256> = agent_chunks.map(|chunk| {
+            let chunk_hash = U256::from(chunk.hash);
+
+            if self.agent_serialized.get(chunk_hash).is_empty() {
+                self.agent_serialized
+                    .setter(chunk_hash)
+                    .set_bytes(&agent[chunk.offset..(chunk.offset + chunk.length)]);
+            }
+
+            chunk_hash
+        }).collect();
+
+        // u8 * 32 = U256 😅
+        let agent_revision_manifest_hash = keccak(
+            agent_revision_manifest
+                .iter()
+                .flat_map(|hash| hash.to_be_bytes::<32>())
+                .collect::<Vec<u8>>()
+        ).into();
+
+        // loop thru each manifest part to build the manifest
+        agent_revision_manifest.iter().for_each(|part|
+            self.agent_serialized_manifests
+                .setter(agent_revision_manifest_hash)
+                .push(*part)
+        );
+    }
+
+    // pub fn add_agent_revision_direct_storagemap(&mut self, agent: Vec<u8>) {
+    //     let mut agent_hasher = Md5::new();
+    //     agent_hasher.update(&agent);
+    //     let agent_hash = format!("{:x}", agent_hasher.finalize());
+
+    //     self.agent_revisions
+    //         .setter(keccak(agent_hash.as_bytes().to_vec()).into())
+    //         .set_bytes(agent);
+    // }
+
+    // pub fn add_agent_revision_old(&mut self, agent: Vec<u8>) {
+    //     let mut agent_hasher = Md5::new();
+    //     agent_hasher.update(&agent);
+    //     let agent_hash = format!("{:x}", agent_hasher.finalize());
+
+    //     let mut agent_revisions: Vec<(String, Vec<u8>)> = Vec::new();
+    //     if self.agent_revisions_serialized.len() > 0 {
+    //         // ciborium
+    //         // let mut decoded_agent_scratch = vec![0u8; 2048];
+    //         // agent_revisions = from_reader_with_buffer(
+    //         //     &self.agent_revisions_serialized.get_bytes()[..],
+    //         //     &mut decoded_agent_scratch[..]
+    //         // ).unwrap();
+    //         // agent_revisions = from_reader(&self.agent_revisions_serialized.get_bytes()[..]).unwrap();
+
+    //         // borsh
+    //         // agent_revisions = borsh::from_slice(&self.agent_revisions_serialized.get_bytes()).unwrap();
+    //         agent_revisions = borsh::from_slice(&self.agent_revisions_serialized.load()).unwrap();
+    //     }
+
+    //     agent_revisions.insert(0, (agent_hash, agent));
+
+    //     /// ciborium
+    //     // let mut agent_revisions_serialized = Vec::new();
+    //     // into_writer(&agent_revisions, &mut agent_revisions_serialized).unwrap();
+
+    //     // borsh
+    //     let mut agent_revisions_serialized = borsh::to_vec(&agent_revisions).unwrap();
+    //     // if agent_revisions.len() > 1 {
+    //     //     agent_revisions_serialized.dedup();
+    //     // }
+
+    //     self.agent_revisions_serialized.set_bytes(&agent_revisions_serialized);
+    // }
+
     /// Gets the name from storage.
     pub fn name(&self) -> String {
         self.name.get_string()
@@ -76,18 +186,15 @@ mod test {
     use std::io::BufReader;
     use filebuffer::FileBuffer;
     use md5::{Md5, Digest};
-    use ciborium::{de::from_reader, ser::into_writer};
+    use ciborium::{de::from_reader, de::from_reader_with_buffer, ser::into_writer};
     use std::collections::VecDeque;
+    use stylus_sdk::storage::*;
     use stylus_sdk::crypto::keccak;
     use stylus_sdk::testing::*;
     use super::*;
 
-    /// Downloads the ONNX model file from Hugging Face if it doesn't exist locally
-    fn download_test_file() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let url = "https://huggingface.co/onnx-community/SmolLM2-135M-Instruct-ONNX-MHA/resolve/main/onnx/model_quantized.onnx";
-        let filename = "model.onnx";
-        // let url = "https://storage.googleapis.com/nftimagebucket/tokens/0x0f6ecda8cf57ee1e6e41b8b7f73006dca5f7a426/preview/TVRjek1qazJPRGd5Tnc9PV82Mw==.gif";
-        // let filename = "test.gif";
+    // model download helper
+    fn download_model(url: &str, filename: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let mut dest = std::env::temp_dir();
         dest.push(filename);
         println!("Downloading test file to: {:?}", dest);
@@ -133,42 +240,102 @@ mod test {
 
     #[test]
     fn test_write_model_to_chain() {
-        // the collection of model files keyed by their hashes
-        let mut models: VecDeque<(String, Vec<u8>)> = VecDeque::new();
+        // this is the actual model, which we store as a list of its revisions
+        // we key each revision by its md5 hash
+        let mut model: VecDeque<(String, Vec<u8>)> = VecDeque::new();
 
-        // 1. Download the binary test file (a GIF).
-        let model_path = download_test_file().expect("Must be a path").display().to_string();
-        
-        // 2. Open the file for reading.
-        let model_buffer = FileBuffer::open(&model_path).expect("Failed to open model file");
+        // our test arb stylus vm
+        let vm = TestVM::default();
+        let mut contract = Greeter::from(&vm);
+
+        // get the first revision of the model
+        let model_rev1_path = download_model(
+            "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/onnx/model_quantized.onnx",
+            "model_rev1.onnx"
+        ).expect("Must be a path").display().to_string();
+        let model_rev1_buffer = FileBuffer::open(&model_rev1_path).expect("Failed to open model file");
         // assert_eq!(keccak(model_buffer.to_vec()).to_string(), "");
 
-        // hash the model content
-        let mut model_buffer_hasher = Md5::new();
-        model_buffer_hasher.update(&model_buffer);
+        // let model_rev1_save_start_time = std::time::Instant::now();
+        contract.add_agent_revision(model_rev1_buffer.to_vec());
+        // let model_rev1_save_elapsed_time = model_rev1_save_start_time.elapsed(); // End timer
+        // assert_eq!(format!("Time taken for saving model rev1: {:?}", model_rev1_save_elapsed_time), "");
 
-        // prepend model vector to the collection
-        models.push_back((
-            format!("{:x}", model_buffer_hasher.finalize()),
-            model_buffer.to_vec(),
-        ));
+        // // hash the model content
+        // let mut model_rev1_hasher = Md5::new();
+        // model_rev1_hasher.update(&model_rev1_buffer);
 
-        // if let Some((model_hash, _)) = models.front() {
-        //     assert_eq!(model_hash, "");
+        // // prepend model vector to the collection
+        // model.push_front((
+        //     format!("{:x}", model_rev1_hasher.finalize()),
+        //     model_rev1_buffer.to_vec(),
+        // ));
+
+        // // if let Some((model_hash, _)) = models.front() {
+        // //     assert_eq!(model_hash, "");
+        // // }
+
+        // // convert the model collection to cbor object
+        // let mut model_serialized = Vec::new();
+        // // let mut model_serialized = Vec::with_capacity(model_buffer.len() + 128);
+        // into_writer(&model, &mut model_serialized).unwrap();
+
+        // // save the serialized model as field in test smart contract
+        // // let start_time = std::time::Instant::now();
+        // contract.set_agent_model(model_serialized);
+        // // let elapsed_time = start_time.elapsed(); // End timer
+        // // assert_eq!(format!("Time taken for saving model rev1: {:?}", elapsed_time), "");
+
+        // get the second revision of the model
+        let model_rev2_path = download_model(
+            "https://huggingface.co/onnx-community/SmolLM2-135M-Instruct-ONNX-MHA/resolve/main/onnx/model_quantized.onnx",
+            "model_rev2.onnx"
+        ).expect("Must be a path").display().to_string();
+        let model_rev2_buffer = FileBuffer::open(&model_rev2_path).expect("Failed to open model file");
+        // // assert_eq!(keccak(model_buffer.to_vec()).to_string(), "");
+
+        let model_rev1_save_start_time = std::time::Instant::now();
+        contract.add_agent_revision(model_rev2_buffer.to_vec());
+        let model_rev1_save_elapsed_time = model_rev1_save_start_time.elapsed(); // End timer
+        assert_eq!(format!("Time taken for saving model rev2: {:?}", model_rev1_save_elapsed_time), "");
+
+        // // hash the model content
+        // let mut model_rev2_hasher = Md5::new();
+        // model_rev2_hasher.update(&model_rev2_buffer);
+
+        // // prepend model vector to the collection
+        // model.push_front((
+        //     format!("{:x}", model_rev2_hasher.finalize()),
+        //     model_rev2_buffer.to_vec(),
+        // ));
+
+        // // convert the model collection to cbor object
+        // // let mut model_serialized_v2 = Vec::new();
+        // into_writer(&model, &mut model_serialized).unwrap();
+
+        // // save the serialized model as field in test smart contract
+        // let start_time = std::time::Instant::now();
+        // contract.set_agent_model(model_serialized);
+        // let elapsed_time = start_time.elapsed(); // End timer
+        // assert_eq!(format!("Time taken for saving model rev2: {:?}", elapsed_time), "");
+        
+
+
+
+
+        // // deserialize the cbor object back to the model collection
+        // let start_time = std::time::Instant::now();
+        // // let mut decoded_models: VecDeque<(String, Vec<u8>)> = from_reader(&model_serialized[..]).unwrap();
+        // // let mut decoded_models_scratch_buffer = vec![0u8; 1024 * 3072]; // 2mb buffer
+        // let mut decoded_models_scratch_buffer = vec![0u8; 2048];
+        // let mut decoded_models: VecDeque<(String, Vec<u8>)> = from_reader_with_buffer(&model_serialized[..], &mut decoded_models_scratch_buffer[..]).unwrap();
+        // if let Some((model_hash_orig, _)) = models.front() {
+        //     if let Some((model_hash, _)) = decoded_models.front() {
+        //         assert_eq!(model_hash, model_hash_orig);
+        //     }
         // }
-
-        // convert the model collection to cbor object
-        let mut model_serialized = Vec::new();
-        // let mut model_serialized = Vec::with_capacity(model_buffer.len() + 128);
-        into_writer(&models, &mut model_serialized).unwrap();
-
-        // deserialize the cbor object back to the model collection
-        let mut decoded_models: VecDeque<(String, Vec<u8>)> = from_reader(&model_serialized[..]).unwrap();
-        if let Some((model_hash_orig, _)) = models.front() {
-            if let Some((model_hash, _)) = decoded_models.front() {
-                assert_eq!(model_hash, model_hash_orig);
-            }
-        }
+        // let elapsed_time = start_time.elapsed(); // End timer
+        // assert_eq!(format!("Time taken for model processing: {:?}", elapsed_time), "");
 
         // // 2. Open the file for reading.
         // let mut model_file = fs::File::open(model_path).unwrap();
@@ -213,9 +380,6 @@ mod test {
         // assert!(!chunks.is_empty(), "Chunks should not be empty");
         // println!("Successfully processed {} binary chunks in the test.", chunks.len());
 
-        // let vm = TestVM::default();
-        // let mut contract = Greeter::from(&vm);
-        
         assert_eq!("Done!", "Done!");
     }
 }
