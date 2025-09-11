@@ -59,29 +59,55 @@ pub struct Greeter {
     // agent_revisions: StorageMap<FixedBytes<32>, StorageBytes>,
     agent_serialized: StorageMap<U256, StorageBytes>,
     agent_serialized_manifests: StorageMap<FixedBytes<32>, StorageVec<StorageU256>>,
+    agent_serialized_latest_manifest_hash: StorageFixedBytes<32>,
     name: StorageString,
 }
 
 /// Declare that `Greeter` is a contract with the following external methods.
 #[public]
 impl Greeter {
+    pub fn get_agent_latest_revision(&mut self) -> Vec<u8> {
+        // get the latest revision manifest
+        let agent_serialized_manifest_parts = self.agent_serialized_manifests
+            .get(self.agent_serialized_latest_manifest_hash.get());
+
+        // agent_serialized_manifest_parts
+
+        // build the revision based on the manifest parts
+        (0..agent_serialized_manifest_parts.len())
+            .map(|i| agent_serialized_manifest_parts.get(i).unwrap())
+            .flat_map(|chunk_hash| {
+                self.agent_serialized.get(chunk_hash).get_bytes().into_iter()
+            })
+            .collect()
+    }
+
     pub fn add_agent_revision(&mut self, agent: Vec<u8>) {
         let mut agent_hasher = Md5::new();
         agent_hasher.update(&agent);
         let agent_hash = format!("{:x}", agent_hasher.finalize());
 
         // break down the agent content (bytes) into chunks
-        let chunk_avg_size: u32 = 262144; // 256kb
+        // // let chunk_avg_size: u32 = 131072; // 128kb
+        // // let chunk_avg_size: u32 = 262144; // 256kb
+        let chunk_avg_size: u32 = 1024 * 1024 * 3; // 3mb
         let chunk_min_size = chunk_avg_size / 4;
         let chunk_max_size = chunk_avg_size * 4;
-        let agent_chunks = fastcdc::v2020::FastCDC::new(
+        // let chunk_max_size: u32 = 1024 * 1024 * 2;
+
+        let agent_chunks = fastcdc::v2020::FastCDC::with_level(
             &agent,
+            // fastcdc::v2020::MINIMUM_MIN,
+            // chunk_max_size / 2,
+            // chunk_max_size,
             chunk_min_size,
             chunk_avg_size,
-            chunk_max_size
+            chunk_max_size,
+            fastcdc::v2020::Normalization::Level3,
         );
         
         // now start the chunking and building the manifest
+        let mut existing_chunk_count = 0;
         let agent_revision_manifest: Vec<U256> = agent_chunks.map(|chunk| {
             let chunk_hash = U256::from(chunk.hash);
 
@@ -89,10 +115,14 @@ impl Greeter {
                 self.agent_serialized
                     .setter(chunk_hash)
                     .set_bytes(&agent[chunk.offset..(chunk.offset + chunk.length)]);
+            } else {
+                existing_chunk_count += 1;
             }
 
             chunk_hash
         }).collect();
+
+        // assert_eq!(existing_chunk_count, 0);
 
         // u8 * 32 = U256 😅
         let agent_revision_manifest_hash = keccak(
@@ -108,6 +138,9 @@ impl Greeter {
                 .setter(agent_revision_manifest_hash)
                 .push(*part)
         );
+
+        // mark the manifest as latest
+        self.agent_serialized_latest_manifest_hash.set(agent_revision_manifest_hash);
     }
 
     // pub fn add_agent_revision_direct_storagemap(&mut self, agent: Vec<u8>) {
@@ -261,6 +294,11 @@ mod test {
         // let model_rev1_save_elapsed_time = model_rev1_save_start_time.elapsed(); // End timer
         // assert_eq!(format!("Time taken for saving model rev1: {:?}", model_rev1_save_elapsed_time), "");
 
+        // // get the latest model revision
+        // let latest_agent_revision = contract.get_agent_latest_revision();
+        // // the latest revision should be equal to the recently added revision
+        // assert_eq!(latest_agent_revision.len(), model_rev1_buffer.to_vec().len());
+
         // // hash the model content
         // let mut model_rev1_hasher = Md5::new();
         // model_rev1_hasher.update(&model_rev1_buffer);
@@ -294,10 +332,28 @@ mod test {
         let model_rev2_buffer = FileBuffer::open(&model_rev2_path).expect("Failed to open model file");
         // // assert_eq!(keccak(model_buffer.to_vec()).to_string(), "");
 
-        let model_rev1_save_start_time = std::time::Instant::now();
+        // let model_rev2_save_start_time = std::time::Instant::now();
         contract.add_agent_revision(model_rev2_buffer.to_vec());
-        let model_rev1_save_elapsed_time = model_rev1_save_start_time.elapsed(); // End timer
-        assert_eq!(format!("Time taken for saving model rev2: {:?}", model_rev1_save_elapsed_time), "");
+        // let model_rev2_save_elapsed_time = model_rev2_save_start_time.elapsed(); // End timer
+        // assert_eq!(format!("Time taken for saving model rev2: {:?}", model_rev2_save_elapsed_time), "");
+
+        // get the latest model revision
+        // let get_latest_model_start_time = std::time::Instant::now();
+        let latest_agent_revision = contract.get_agent_latest_revision();
+        // let get_latest_model_elapsed_time = get_latest_model_start_time.elapsed(); // End timer
+        assert_eq!(latest_agent_revision, model_rev2_buffer.to_vec(), "Not the same!");
+        // assert_eq!(format!("Time taken for loading the latest model: {:?}", get_latest_model_elapsed_time), "");
+
+        // let mut latest_agent_revision_hasher = Md5::new();
+        // latest_agent_revision_hasher.update(&latest_agent_revision);
+        // let mut model_rev2_buffer_hasher = Md5::new();
+        // model_rev2_buffer_hasher.update(&model_rev2_buffer.to_vec());
+
+        // // the latest revision should be equal to the recently added revision
+        // assert_eq!(
+        //     format!("{:x}", latest_agent_revision_hasher.finalize()),
+        //     format!("{:x}", model_rev2_buffer_hasher.finalize())
+        // );
 
         // // hash the model content
         // let mut model_rev2_hasher = Md5::new();
