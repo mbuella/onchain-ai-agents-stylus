@@ -20,6 +20,12 @@ ciborium = "0.2.2"
 borsh = "1.5.7"
 minicbor = { version = "2.1.1", features = ["derive"]}
 fastcdc = "3.2.1"
+ruzstd = { version = "0.8.1", default-features = false }
+hashbrown = { version = "0.16.0", default-features = true }
+libflate = "2.1.0"
+fxhash = "0.2.1"
+vector-map = "1.0.2"
+miniz_oxide = "0.8.9"
 
 [dev-dependencies]
 alloy-primitives = { version = "=0.8.20", features = ["sha3-keccak"] }

@@ -27,15 +27,29 @@
 #[macro_use]
 extern crate alloc;
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
+use alloc::string::{String, ToString};
+use alloc::collections::{VecDeque, BTreeMap};
+
+use hashbrown::HashMap;
+use vector_map::VecMap as Map;
+
+// extern crate fxhash;
+// use fxhash::FxHashMap;
 
 use ciborium::{de::from_reader_with_buffer, de::from_reader, ser::into_writer};
+// use ruzstd::encoding::{compress, compress_to_vec, FrameCompressor,  CompressionLevel};
+// use ruzstd::decoding::FrameDecoder;
+use miniz_oxide::deflate::compress_to_vec;
+use miniz_oxide::inflate::decompress_to_vec_with_limit;
+// use core2::io::{Read, Write};
+// use libflate::gzip::{Encoder, Decoder};
 use borsh::{BorshSerialize, BorshDeserialize};
 // use std::collections::VecDeque;
 use md5::{Md5, Digest};
 
 /// Import items from the SDK. The prelude contains common traits and macros.
-use stylus_sdk::alloy_primitives::{address, Address, fixed_bytes, FixedBytes, U256, B256};
+use stylus_sdk::alloy_primitives::{address, Address, fixed_bytes, FixedBytes, U256, B256, Uint};
 use stylus_sdk::abi::Bytes;
 use stylus_sdk::prelude::*;
 use stylus_sdk::storage::*;
@@ -53,12 +67,14 @@ use stylus_sdk::crypto::keccak;
 //         StorageString name;
 //     }
 // }
+
 #[storage]
 #[entrypoint]
 pub struct Greeter {
     // agent_revisions: StorageMap<FixedBytes<32>, StorageBytes>,
-    agent_serialized: StorageMap<U256, StorageBytes>,
+    agent_serialized: StorageMap<FixedBytes<8>, StorageBytes>,
     agent_serialized_manifests: StorageMap<FixedBytes<32>, StorageVec<StorageU256>>,
+    agent_serialized_manifests_serialized: StorageBytes,
     agent_serialized_latest_manifest_hash: StorageFixedBytes<32>,
     name: StorageString,
 }
@@ -67,25 +83,48 @@ pub struct Greeter {
 #[public]
 impl Greeter {
     pub fn get_agent_latest_revision(&mut self) -> Vec<u8> {
-        // get the latest revision manifest
-        let agent_serialized_manifest_parts = self.agent_serialized_manifests
-            .get(self.agent_serialized_latest_manifest_hash.get());
+        // // return empty vec if agent_serialized_manifests_serialized is empty
+        // if self.agent_serialized_manifests_serialized.len() == 0 {
+        //     Vec::new()
+        // }
 
-        // agent_serialized_manifest_parts
+        // get the latest revision manifest
+        let agent_revision_manifests: BTreeMap<String, Vec<u64>> = borsh::from_slice(&self.agent_serialized_manifests_serialized.get_bytes()).unwrap();
+        // assert_eq!(
+        //     agent_revision_manifests.get(&self.agent_serialized_latest_manifest_hash.get().to_string()).unwrap().len(),
+        //     0 
+        // );
+        let agent_revision_manifest = agent_revision_manifests.get(
+            &self.agent_serialized_latest_manifest_hash.get().to_string()
+        ).unwrap();
 
         // build the revision based on the manifest parts
-        (0..agent_serialized_manifest_parts.len())
-            .map(|i| agent_serialized_manifest_parts.get(i).unwrap())
-            .flat_map(|chunk_hash| {
+        agent_revision_manifest.iter()
+            .flat_map(|part| {
+                let chunk_hash: FixedBytes<8> = FixedBytes::from_slice(&part.to_be_bytes());
+    
                 self.agent_serialized.get(chunk_hash).get_bytes().into_iter()
             })
             .collect()
+
+        // let agent_serialized_manifest_parts = self.agent_serialized_manifests
+        //     .get(self.agent_serialized_latest_manifest_hash.get());
+
+        // // agent_serialized_manifest_parts
+
+        // // build the revision based on the manifest parts
+        // (0..agent_serialized_manifest_parts.len())
+        //     .map(|i| agent_serialized_manifest_parts.getter(i).as_deref().unwrap().get())
+        //     .flat_map(|chunk_hash| {
+        //         self.agent_serialized.get(chunk_hash).get_bytes().into_iter()
+        //     })
+        //     .collect()
     }
 
     pub fn add_agent_revision(&mut self, agent: Vec<u8>) {
-        let mut agent_hasher = Md5::new();
-        agent_hasher.update(&agent);
-        let agent_hash = format!("{:x}", agent_hasher.finalize());
+        // let mut agent_hasher = Md5::new();
+        // agent_hasher.update(&agent);
+        // let agent_hash = format!("{:x}", agent_hasher.finalize());
 
         // break down the agent content (bytes) into chunks
         // // let chunk_avg_size: u32 = 131072; // 128kb
@@ -106,41 +145,120 @@ impl Greeter {
             fastcdc::v2020::Normalization::Level3,
         );
         
-        // now start the chunking and building the manifest
-        let mut existing_chunk_count = 0;
-        let agent_revision_manifest: Vec<U256> = agent_chunks.map(|chunk| {
-            let chunk_hash = U256::from(chunk.hash);
+        // Collect chunk hashes and save chunks in a single pass.
+        // let mut agent_revision_manifests = Map::new();
+        // let mut agent_revision_manifests: Vec<(String,Vec<u64>)> = Vec::new();
+        let mut agent_revision_manifests: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        // load agent_revision_manifests from the blockchain if it exists
+        if self.agent_serialized_manifests_serialized.len() > 0 {
+            agent_revision_manifests = borsh::from_slice(&self.agent_serialized_manifests_serialized.get_bytes()).unwrap();
+        }
+
+        let mut agent_revision_chunkhashes_bytes: Vec<u8> = Vec::new();
+        let mut agent_revision_manifest: Vec<u64> = agent_chunks.clone().map(|chunk| {
+            // add chunks to agent_serialized in chain
+            let chunk_hash: FixedBytes<8> = FixedBytes::from_slice(&chunk.hash.to_be_bytes());
 
             if self.agent_serialized.get(chunk_hash).is_empty() {
                 self.agent_serialized
                     .setter(chunk_hash)
                     .set_bytes(&agent[chunk.offset..(chunk.offset + chunk.length)]);
-            } else {
-                existing_chunk_count += 1;
             }
+            
+            // append chunk hash to agent_revision_chunkhashes_bytes
+            agent_revision_chunkhashes_bytes.extend_from_slice(&chunk.hash.to_le_bytes());
 
-            chunk_hash
+            chunk.hash
         }).collect();
 
-        // assert_eq!(existing_chunk_count, 0);
+        // Calculate the manifest hash from the collected chunk hash bytes.
+        // let mut agent_revision_manifest_hasher = Md5::new();
+        // agent_revision_manifest_hasher.update(&agent_revision_chunkhashes_bytes);
+        // let agent_revision_manifest_hash = agent_revision_manifest_hasher.finalize().to_vec();
+        let agent_revision_manifest_hash = keccak(agent_revision_chunkhashes_bytes);
 
-        // u8 * 32 = U256 😅
-        let agent_revision_manifest_hash = keccak(
-            agent_revision_manifest
-                .iter()
-                .flat_map(|hash| hash.to_be_bytes::<32>())
-                .collect::<Vec<u8>>()
-        ).into();
-
-        // loop thru each manifest part to build the manifest
-        agent_revision_manifest.iter().for_each(|part|
-            self.agent_serialized_manifests
-                .setter(agent_revision_manifest_hash)
-                .push(*part)
+        // agent_revision_manifests.insert(
+        //     agent_revision_manifest_hash.to_string(),
+        //     agent_revision_manifest.clone()
+        // );
+        // agent_revision_manifests.push((
+        //     agent_revision_manifest_hash.to_string(),
+        //     agent_revision_manifest.clone()
+        // ));
+        agent_revision_manifests.insert(
+            agent_revision_manifest_hash.to_string(),
+            agent_revision_manifest.clone()
         );
+        // assert_eq!(
+        //     agent_revision_manifests.get("0xa6c042c7b58b39472428c3adea61e452ac68bf76af8fbff37bb1f5141b24e7c9").unwrap(),
+        //     &agent_revision_manifest,
+        //     "It works!"
+        // );
+        // assert_ne!(
+        //     agent_revision_manifests.iter().filter(|&(hash, manifest)| hash == "0xa6c042c7b58b39472428c3adea61e452ac68bf76af8fbff37bb1f5141b24e7c9").next().unwrap().1,
+        //     agent_revision_manifest,
+        //     "It works!"
+        // );
+        // assert_ne!(
+        //     agent_revision_manifests.into_keys().collect::<Vec<_>>()[0],
+        //     "0xa6c042c7b58b39472428c3adea61e452ac68bf76af8fbff37bb1f5141b24e7c9"
+        // );
+
+        // serialize agent revision manifests via borsh
+        let agent_revision_manifests_serialized = borsh::to_vec(&agent_revision_manifests).unwrap();
+
+        // // compress agent_revision_manifests via zstd
+        // let agent_revision_manifests_compressed = compress_to_vec(&agent_revision_manifests_serialized, 1);
+        // // let mut zstd_encoder = FrameCompressor::new(CompressionLevel::Fastest);
+        // // zstd_encoder.set_drain(Vec::new());
+        // // zstd_encoder.set_source(agent_revision_manifests_serialized);
+        // // zstd_encoder.compress();
+        // // let agent_revision_manifests_compressed: Vec<_> = zstd_encoder.take_drain().unwrap();
+        // // let mut agent_revision_manifests_compressed = Vec::new();
+        // // compress(agent_revision_manifests_serialized, &mut agent_revision_manifests_compressed, CompressionLevel::Fastest);
+        // // // let agent_revision_manifests_compressed = compress_to_vec(agent_revision_manifests_serialized, CompressionLevel::Fastest);
+        // assert_eq!(agent_revision_manifests_serialized.len(), agent.len());
+
+        // save agent_revision_manifests_serialized onchain
+        self.agent_serialized_manifests_serialized.set_bytes(agent_revision_manifests_serialized);
 
         // mark the manifest as latest
         self.agent_serialized_latest_manifest_hash.set(agent_revision_manifest_hash);
+
+        // let mut existing_chunk_count = 0;
+        // let agent_revision_manifest: Vec<U256> = agent_chunks.clone().map(|chunk| {
+        //     let chunk_hash = U256::from(chunk.hash);
+
+        //     if self.agent_serialized.get(chunk_hash).is_empty() {
+        //         self.agent_serialized
+        //             .setter(chunk_hash)
+        //             .set_bytes(&agent[chunk.offset..(chunk.offset + chunk.length)]);
+        //     } else {
+        //         existing_chunk_count += 1;
+        //     }
+
+        //     chunk_hash
+        // }).collect();
+
+        // // assert_eq!(existing_chunk_count, 0);
+
+        // // u8 * 32 = U256 😅
+        // let agent_revision_manifest_hash = keccak(
+        //     agent_revision_manifest
+        //         .iter()
+        //         .flat_map(|hash| hash.to_be_bytes::<32>())
+        //         .collect::<Vec<u8>>()
+        // ).into();
+
+        // // loop thru each manifest part to build the manifest
+        // agent_revision_manifest.iter().for_each(|part|
+        //     self.agent_serialized_manifests
+        //         .setter(agent_revision_manifest_hash)
+        //         .push(*part)
+        // );
+
+        // // mark the manifest as latest
+        // self.agent_serialized_latest_manifest_hash.set(agent_revision_manifest_hash);
     }
 
     // pub fn add_agent_revision_direct_storagemap(&mut self, agent: Vec<u8>) {
@@ -289,10 +407,10 @@ mod test {
         let model_rev1_buffer = FileBuffer::open(&model_rev1_path).expect("Failed to open model file");
         // assert_eq!(keccak(model_buffer.to_vec()).to_string(), "");
 
-        // let model_rev1_save_start_time = std::time::Instant::now();
+        let model_rev1_save_start_time = std::time::Instant::now();
         contract.add_agent_revision(model_rev1_buffer.to_vec());
-        // let model_rev1_save_elapsed_time = model_rev1_save_start_time.elapsed(); // End timer
-        // assert_eq!(format!("Time taken for saving model rev1: {:?}", model_rev1_save_elapsed_time), "");
+        let model_rev1_save_elapsed_time = model_rev1_save_start_time.elapsed(); // End timer
+        println!("Time taken for saving model rev1: {:?}", model_rev1_save_elapsed_time);
 
         // // get the latest model revision
         // let latest_agent_revision = contract.get_agent_latest_revision();
@@ -332,17 +450,17 @@ mod test {
         let model_rev2_buffer = FileBuffer::open(&model_rev2_path).expect("Failed to open model file");
         // // assert_eq!(keccak(model_buffer.to_vec()).to_string(), "");
 
-        // let model_rev2_save_start_time = std::time::Instant::now();
+        let model_rev2_save_start_time = std::time::Instant::now();
         contract.add_agent_revision(model_rev2_buffer.to_vec());
-        // let model_rev2_save_elapsed_time = model_rev2_save_start_time.elapsed(); // End timer
-        // assert_eq!(format!("Time taken for saving model rev2: {:?}", model_rev2_save_elapsed_time), "");
+        let model_rev2_save_elapsed_time = model_rev2_save_start_time.elapsed(); // End timer
+        println!("Time taken for saving model rev2: {:?}", model_rev2_save_elapsed_time);
 
         // get the latest model revision
-        // let get_latest_model_start_time = std::time::Instant::now();
+        let get_latest_model_start_time = std::time::Instant::now();
         let latest_agent_revision = contract.get_agent_latest_revision();
-        // let get_latest_model_elapsed_time = get_latest_model_start_time.elapsed(); // End timer
+        let get_latest_model_elapsed_time = get_latest_model_start_time.elapsed(); // End timer
         assert_eq!(latest_agent_revision, model_rev2_buffer.to_vec(), "Not the same!");
-        // assert_eq!(format!("Time taken for loading the latest model: {:?}", get_latest_model_elapsed_time), "");
+        println!("Time taken for loading the latest model: {:?}", get_latest_model_elapsed_time);
 
         // let mut latest_agent_revision_hasher = Md5::new();
         // latest_agent_revision_hasher.update(&latest_agent_revision);
