@@ -10,22 +10,25 @@ alloy-primitives = "=0.8.20"
 alloy-sol-types = "=0.8.20"
 stylus-sdk = "0.9.0"
 hex = { version = "0.4", default-features = false }
-ort = "=2.0.0-rc.10"
+# ort = "=2.0.0-rc.10"
 reqwest = { version = "0.12.23", default-features = true, features = ["blocking"] }
-base64 = "0.21"
-cdc = "0.1.1"
+# base64 = "0.21"
+# cdc = "0.1.1"
 filebuffer = "1.0.0"
 md-5 = "0.10.6"
-ciborium = "0.2.2"
-borsh = "1.5.7"
-minicbor = { version = "2.1.1", features = ["derive"]}
-fastcdc = "3.2.1"
-ruzstd = { version = "0.8.1", default-features = false }
-hashbrown = { version = "0.16.0", default-features = true }
-libflate = "2.1.0"
-fxhash = "0.2.1"
-vector-map = "1.0.2"
-miniz_oxide = "0.8.9"
+# ciborium = "0.2.2"
+# borsh = "1.5.7"
+# minicbor = { version = "2.1.1", features = ["derive"]}
+# fastcdc = "3.2.1"
+# ruzstd = { version = "0.8.1", default-features = false }
+# hashbrown = { version = "0.16.0", default-features = true }
+# libflate = "2.1.0"
+# fxhash = "0.2.1"
+# vector-map = "1.0.2"
+# miniz_oxide = "0.8.9"
+# bitcode = { version = "0.6.7", default-features = false, features = ["derive"] }
+seq_chunking = "0.1.0"
+rkyv = { version = "0.8.11", default-features = false, features = ["alloc","bytecheck"] }
 
 [dev-dependencies]
 alloy-primitives = { version = "=0.8.20", features = ["sha3-keccak"] }
@@ -34,7 +37,7 @@ ethers = "2.0"
 eyre = "0.6.8"
 stylus-sdk = { version = "0.9.0", features = ["stylus-test"] }
 dotenv = "0.15.0"
-cdchunking = "0.1"
+# cdchunking = "0.1"
 
 [features]
 default = ["mini-alloc"]
