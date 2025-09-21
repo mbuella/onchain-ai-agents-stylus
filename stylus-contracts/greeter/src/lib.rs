@@ -30,7 +30,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use alloc::string::{String, ToString};
 // use alloc::collections::{VecDeque, BTreeMap};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 // use hashbrown::HashMap;
 // use vector_map::VecMap as Map;
@@ -38,7 +38,11 @@ use alloc::collections::BTreeMap;
 // extern crate fxhash;
 // use fxhash::FxHashMap;
 
-use seq_chunking::{SeqChunking, ChunkingConfig, SeqOpMode};
+// use seq_chunking::{SeqChunking, ChunkingConfig, SeqOpMode};
+use hash_roll::zstd::Zstd;
+use hash_roll::{ToChunkIncr, ChunkIncr};
+// use hash_roll::fastcdc::FastCdc;
+// use hash_roll::{ToChunkIncr, ChunkIncr, gear_table::GEAR_64};
 
 // use ciborium::{de::from_reader_with_buffer, de::from_reader, ser::into_writer};
 // use ruzstd::encoding::{compress, compress_to_vec, FrameCompressor,  CompressionLevel};
@@ -85,8 +89,9 @@ use stylus_sdk::crypto::keccak;
     derive(Debug),
 )]
 pub struct AgentRevision {
-    pub latest_hash: [u8; 16],
+    pub revisions: BTreeMap<[u8; 16], Vec<u8>>,
     pub manifests: BTreeMap<[u8; 16], Vec<[u8; 16]>>,
+    pub latest_hash: [u8; 16],
 }
 
 #[storage]
@@ -122,7 +127,17 @@ impl Greeter {
         //     0 
         // );
 
-        // get the latest agent revision
+    //     // get the latest agent revision
+    //     // Create a HashSet for fast lookups
+    //     let key_set: BTreeSet<> = keys_to_keep.into_iter().collect();
+    
+    // // Create a Vec<u8> from concatenated Vec<u8>s of filtered values
+    // let concatenated_vec: Vec<u8> = map
+    //     .iter()
+    //     .filter(|(key, _)| key_set.contains(key))
+    //     .flat_map(|(_, value)| value.clone()) // Flatten the Vec<u8>s
+    //     .collect();
+
         // let agent_revision_manifest = agent_revision_manifests.get(
         //     &self.agent_serialized_latest_manifest_hash.get().to_string()
         // ).unwrap();
@@ -133,12 +148,21 @@ impl Greeter {
             .unwrap()
             // now rebuild the revision bytes
             .iter()
-            .flat_map(|part| {
-                let chunk_key = FixedBytes::<16>::new(*part);
+            // .flat_map(|part| {
+            //     let chunk_key = FixedBytes::<16>::new(*part);
     
-                self.agent_serialized.get(chunk_key).get_bytes().into_iter()
+            //     self.agent_serialized.get(chunk_key).get_bytes().into_iter()
+            // })
+            .flat_map(|chunk_hash_bytes| {
+                // assert_eq!(*agent_revision.revisions.get(chunk_hash_bytes).unwrap(), 0);
+                // agent_revision.revisions.get(chunk_hash_bytes).unwrap().clone()
+                let chunk_hash: FixedBytes<16> = FixedBytes::from_slice(chunk_hash_bytes);
+    
+                self.agent_serialized.get(chunk_hash).get_bytes().into_iter()
             })
-            .collect()
+            .collect::<Vec<_>>()
+            // .concat()
+            // .cloned()
 
         // // build the revision based on the manifest parts
         // agent_revision_manifest.iter()
@@ -168,45 +192,13 @@ impl Greeter {
         // agent_hasher.update(&agent);
         // let agent_hash = format!("{:x}", agent_hasher.finalize());
 
-        // break down the agent content (bytes) into chunks
-        // // let chunk_avg_size: u32 = 131072; // 128kb
-        // // let chunk_avg_size: u32 = 262144; // 256kb
-        let chunk_avg_size: u64 = 1024 * 1024 * 3; // 3mb
-        let chunk_min_size = chunk_avg_size / 4;
-        let chunk_max_size = chunk_avg_size * 4;
-        // let chunk_max_size: u32 = 1024 * 1024 * 2;
-
-        // Create a chunker with default settings
-        let chunker = SeqChunking::new();
-        // let chunker_config = ChunkingConfig::builder()
-        //     .seq_threshold(10)                    // Longer sequences needed
-        //     .op_mode(SeqOpMode::Decreasing)       // Look for decreasing sequences
-        //     .jump_trigger(100)                    // Jump after 100 opposing slopes
-        //     .min_block_size(chunk_min_size)
-        //     .max_block_size(chunk_max_size)
-        //     .build()
-        //     .expect("Invalid configuration");
-        // let chunker = SeqChunking::from_config(chunker_config);
-        // let agent_chunks: Vec<_> = chunker.chunk_all(&agent).collect();
-
-        // let agent_chunks = fastcdc::v2020::FastCDC::with_level(
-        //     &agent,
-        //     // fastcdc::v2020::MINIMUM_MIN,
-        //     // chunk_max_size / 2,
-        //     // chunk_max_size,
-        //     chunk_min_size,
-        //     chunk_avg_size,
-        //     chunk_max_size,
-        //     fastcdc::v2020::Normalization::Level3,
-        // );
-        
-        // Collect chunk hashes and save chunks in a single pass.
         // let mut agent_revision_manifests = Map::new();
         // let mut agent_revision_manifests: Vec<(String,Vec<u64>)> = Vec::new();
         // let mut agent_revision_manifests: BTreeMap<String, Vec<u64>> = BTreeMap::new();
         let mut agent_revision = AgentRevision {
-            latest_hash: [0; 16],
+            revisions: BTreeMap::new(),
             manifests: BTreeMap::new(),
+            latest_hash: [0; 16],
         };
         // load agent_revision_manifests from the blockchain if it exists
         if self.agent_serialized_manifests_serialized.len() > 0 {
@@ -220,38 +212,190 @@ impl Greeter {
             agent_revision = deserialize::<AgentRevision, Error>(agent_revision_archived).unwrap();
         }
 
-        // let mut agent_revision_manifest: Vec<u8> = Vec::new();
+        // assert_eq!(agent_revision.latest_hash, [0; 16]);
+
+        // // break down the agent content (bytes) into chunks
+        // // // let chunk_avg_size: u32 = 131072; // 128kb
+        // // // let chunk_avg_size: u32 = 262144; // 256kb
+        // let chunk_avg_size: u64 = 65536; // 64kb
+        let chunk_avg_size: u64 = 131072; // 128kb
+        // let chunk_avg_size: u64 = 262144; // 256kb
+        // let chunk_avg_size: u64 = 1024 * 1024 * 3; // 3mb
+        let chunk_min_size = chunk_avg_size / 4;
+        let chunk_max_size = chunk_avg_size * 4;
+        // // let chunk_max_size: u32 = 1024 * 1024 * 2;
+
         let mut agent_revision_chunkhashes_bytes: Vec<u8> = Vec::new();
         let mut agent_revision_manifest_hasher = Md5::new();
-        // let agent_revision_manifest: Vec<u64> = Vec::new();
-        // let mut agent_revision_manifest: Vec<u64> = agent_chunks.clone().into_iter().map(|chunk| {
-        // let agent_revision_manifest: Vec<u64> = agent_chunks.clone().into_iter().map(|chunk| {
-        let mut ctr = 0;
-        let agent_revision_manifest: Vec<[u8; 16]> = chunker.chunk_all(&agent).collect::<Vec<_>>().into_iter()
-            .map(|chunk| {
-                let chunk_hash = Md5::digest(&chunk.data);
+        let mut agent_revision_manifest: Vec<[u8; 16]> = Vec::new();
+
+        let zstd = Zstd::with_target_section_size(1024 * 1024 * 2);
+        // let zstd = FastCdc::default();
+        // let zstd = FastCdc::new(
+        //     &GEAR_64,
+        //     chunk_min_size,
+        //     chunk_avg_size,
+        //     chunk_max_size,
+        // );
+        let mut incr = zstd.to_chunk_incr();
+        let mut zstd_cursor = 0;
+        let slice = &agent[zstd_cursor..];
+
+        let mut ctr: i32 = 0;
+
+        // #[inline]
+        // fn insert_chunk(mut agent_revisions: BTreeMap<[u8; 16], Vec<u8>>, mut agent_revision_manifest: Vec<[u8; 16]>, mut agent_revision_manifest_hasher: impl Digest, chunk: &[u8], ctr: &mut i32) {
+        //     let chunk_hash = Md5::digest(&chunk);
+        //     let chunk_hash_bytes: [u8; 16] = chunk_hash.into();
+            
+        //     // insert unique chunks to the revisions map
+        //     if !agent_revisions.contains_key(&chunk_hash_bytes) {
+        //         agent_revisions.insert(
+        //             chunk_hash_bytes,
+        //             chunk.to_vec(),
+        //         );
+        //     }
+
+        //     // add the current chunk hash to rev manifest map
+        //     agent_revision_manifest.push(chunk_hash_bytes);
+
+        //     // update the current revision hasher with the current chunk
+        //     agent_revision_manifest_hasher.update(chunk_hash_bytes.as_slice());
+
+        //     *ctr += 1;
+        // }
+
+        while zstd_cursor < agent.len() {
+            let slice = &agent[zstd_cursor..];
+            if let Some(chunk_len) = incr.push(slice) {
+                // insert_chunk(agent_revision.revisions, agent_revision_manifest, agent_revision_manifest_hasher, &slice[..chunk_len], &mut ctr);
+                let chunk = &slice[..chunk_len];
+                let chunk_hash = Md5::digest(&slice[..chunk_len]);
                 let chunk_hash_bytes: [u8; 16] = chunk_hash.into();
                 let chunk_key = FixedBytes::<16>::from(&chunk_hash_bytes);
-                                
-                // save the chunk if it not already exists
+                
+                // insert unique chunks to the revisions map
+                // if !agent_revision.revisions.contains_key(&chunk_hash_bytes) {
+                //     agent_revision.revisions.insert(
+                //         chunk_hash_bytes,
+                //         chunk.to_vec(),
+                //     );
+
+                //     ctr += 1;
+                // }
                 if self.agent_serialized.get(chunk_key).is_empty() {
                     self.agent_serialized
                         .setter(chunk_key)
-                        .set_bytes(&chunk.data);
+                        .set_bytes(&chunk);
                 }
 
-                // update the rev manifest with the current chunk hash
+                // add the current chunk hash to rev manifest map
+                agent_revision_manifest.push(chunk_hash_bytes);
+
+                // update the current revision hasher with the current chunk
                 agent_revision_manifest_hasher.update(chunk_hash_bytes.as_slice());
 
-                ctr += 1;
+                zstd_cursor += chunk_len;
+            } else {
+                // insert_chunk(agent_revision.revisions, agent_revision_manifest, agent_revision_manifest_hasher, &slice, &mut ctr);
+                let chunk = &slice;
+                let chunk_hash = Md5::digest(&chunk);
+                let chunk_hash_bytes: [u8; 16] = chunk_hash.into();
+                let chunk_key = FixedBytes::<16>::from(&chunk_hash_bytes);
+                
+                // insert unique chunks to the revisions map
+                // if !agent_revision.revisions.contains_key(&chunk_hash_bytes) {
+                //     agent_revision.revisions.insert(
+                //         chunk_hash_bytes,
+                //         chunk.to_vec(),
+                //     );
 
-                // Return the GenericArray for flattening.
-                // chunk_hash
-                chunk_hash_bytes
-            })
-            // // generate hash for each chunk
-            // .flat_map(|chunk_hash| chunk_hash.into_iter())
-            .collect();
+                //     ctr += 1;
+                // }
+                if self.agent_serialized.get(chunk_key).is_empty() {
+                    self.agent_serialized
+                        .setter(chunk_key)
+                        .set_bytes(&chunk);
+                }
+
+                // add the current chunk hash to rev manifest map
+                agent_revision_manifest.push(chunk_hash_bytes);
+
+                // update the current revision hasher with the current chunk
+                agent_revision_manifest_hasher.update(chunk_hash_bytes.as_slice());
+
+
+                break;
+            }
+        }
+
+        // assert_eq!(ctr, 78);
+
+        // // Create a chunker with default settings
+        // let chunker = SeqChunking::new();
+        // // let chunker_config = ChunkingConfig::builder()
+        // //     // .seq_threshold(4)                    // Longer sequences needed
+        // //     // .op_mode(SeqOpMode::Decreasing)       // Look for decreasing sequences
+        // //     // .jump_trigger(100)                    // Jump after 100 opposing slopes
+        // //     // .min_block_size(chunk_min_size)
+        // //     // .max_block_size(chunk_max_size)
+        // //     .avg_block_size(chunk_avg_size)
+        // //     .build()
+        // //     .expect("Invalid configuration");
+        // // let chunker = SeqChunking::from_config(chunker_config);
+        // // let agent_chunks: Vec<_> = chunker.chunk_all(&agent).collect();
+
+        // // // let agent_chunks = fastcdc::v2020::FastCDC::with_level(
+        // // //     &agent,
+        // // //     // fastcdc::v2020::MINIMUM_MIN,
+        // // //     // chunk_max_size / 2,
+        // // //     // chunk_max_size,
+        // // //     chunk_min_size,
+        // // //     chunk_avg_size,
+        // // //     chunk_max_size,
+        // // //     fastcdc::v2020::Normalization::Level3,
+        // // // );
+        
+        // // let mut agent_revision_manifest: Vec<u8> = Vec::new();
+        // // let mut agent_revision_chunkhashes_bytes: Vec<u8> = Vec::new();
+        // // let mut agent_revision_manifest_hasher = Md5::new();
+        // // let agent_revision_manifest: Vec<u64> = Vec::new();
+        // // let mut agent_revision_manifest: Vec<u64> = agent_chunks.clone().into_iter().map(|chunk| {
+        // // let agent_revision_manifest: Vec<u64> = agent_chunks.clone().into_iter().map(|chunk| {
+        // let mut ctr = 0;
+        // let agent_revision_manifest: Vec<[u8; 16]> = chunker.chunk_all(&agent).collect::<Vec<_>>().into_iter()
+        //     .map(|chunk| {
+        //         let chunk_hash = Md5::digest(&chunk.data);
+        //         let chunk_hash_bytes: [u8; 16] = chunk_hash.into();
+        //         let chunk_key = FixedBytes::<16>::from(&chunk_hash_bytes);
+                                
+        //         // save the chunk if it not already exists
+        //         // if !agent_revision.revisions.contains_key(&chunk_hash_bytes) {
+        //         //     agent_revision.revisions.insert(
+        //         //         chunk_hash_bytes,
+        //         //         chunk.data.to_vec(),
+        //         //     );
+                    
+        //         //     ctr += 1;
+        //         // }
+        //         if self.agent_serialized.get(chunk_key).is_empty() {
+        //             self.agent_serialized
+        //                 .setter(chunk_key)
+        //                 .set_bytes(&chunk.data);
+        //         }
+
+        //         // update the rev manifest with the current chunk hash
+        //         agent_revision_manifest_hasher.update(chunk_hash_bytes.as_slice());
+
+        //         // Return the GenericArray for flattening.
+        //         // chunk_hash
+        //         chunk_hash_bytes
+        //     })
+        //     // // generate hash for each chunk
+        //     // .flat_map(|chunk_hash| chunk_hash.into_iter())
+        //     .collect();
+
+        // // assert_eq!(17500, ctr); // old, new
 
         // add the agent revision manifest
         let agent_revision_hash: [u8; 16] = agent_revision_manifest_hasher.finalize().into();
